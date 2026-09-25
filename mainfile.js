@@ -35,3 +35,24 @@ function announce(message) {
     region.textContent = message;
   }, 50);
 }
+
+const STORAGE_KEY = "silentUpdates_lastVisit_" + HOSTNAME;
+
+function trackVisit() {
+  chrome.storage.local.get([STORAGE_KEY], function (result) {
+    const previous = result[STORAGE_KEY];
+
+    if (previous) {
+      announce("Welcome back to " + HOSTNAME + ".");
+    }
+
+    const record = {
+      lastVisit: Date.now()
+    };
+
+    const data = {};
+    data[STORAGE_KEY] = record;
+
+    chrome.storage.local.set(data);
+  });
+}
