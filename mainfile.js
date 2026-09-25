@@ -56,3 +56,22 @@ function trackVisit() {
     chrome.storage.local.set(data);
   });
 }
+
+
+function minutesAgo(timestamp) {
+  const diffMs = Date.now() - timestamp;
+  const mins = Math.max(0, Math.round(diffMs / 60000));
+
+  if (mins < 1) return "less than a minute ago";
+  if (mins === 1) return "1 minute ago";
+  if (mins < 60) return mins + " minutes ago";
+
+  const hours = Math.round(mins / 60);
+
+  if (hours === 1) return "1 hour ago";
+  if (hours < 24) return hours + " hours ago";
+
+  const days = Math.round(hours / 24);
+
+  return days === 1 ? "1 day ago" : days + " days ago";
+}
