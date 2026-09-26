@@ -4,10 +4,22 @@
   const HOSTNAME = window.location.hostname || "this page";
   const STORAGE_KEY = "silentUpdates_lastVisit_" + HOSTNAME;
   const MAX_QUEUE_LENGTH = 200;
-  const MIN_TEXT_LENGTH = 1;
   const LIVE_REGION_ID = "silent-updates-live-region";
+  const REVISIT_PROMPT_DELAY_MS = 4000;
+  const ACTION_WINDOW_MS = 10000;
+
+  const NOTIFICATION_KEYWORDS = ["notification", "notif", "alert", "toast", "badge", "unread", "chat", "message"];
+  const POPUP_KEYWORDS = ["modal", "popup", "overlay", "dialog"];
 
   let changeQueue = [];
+  let openPopups = [];
+  let lastNotificationElement = null;
+
+  let awaitingPromptResponse = false;
+  let awaitingAction = false;
+  let actionTimeoutId = null;
+
+  let lastSummarySnapshot = [];
 
   function createLiveRegion() {
     let region = document.getElementById(LIVE_REGION_ID);
@@ -65,6 +77,8 @@
       if (previous && previous.lastVisit) {
         const ago = minutesAgo(previous.lastVisit);
         announce("Welcome back to " + HOSTNAME + ". Last visited " + ago + ".");
+
+        window.setTimeout(maybeOfferRevisitSummary, REVISIT_PROMPT_DELAY_MS);
       }
 
       const record = { lastVisit: Date.now() };
@@ -74,50 +88,78 @@
     });
   }
 
+  function maybeOfferRevisitSummary() {
+    if (changeQueue.length === 0) return;
+    awaitingPromptResponse = true;
+    announce("New changes detected in site interface. Would you like a summary? Press Y for yes, N for no.");
+  }
+
+  function matchesKeywords(node, keywords) {
+    if (!(node instanceof Element)) return false;
+    const cls = typeof node.className === "string" ? node.className : "";
+    const hay = (cls + " " + (node.id || "") + " " + (node.getAttribute("role") || "")).toLowerCase();
+    return keywords.some(function (k) { return hay.indexOf(k) !== -1; });
+  }
+
+  function isPopupNode(node) {
+    if (!(node instanceof Element)) return false;
+    const role = node.getAttribute("role");
+    return matchesKeywords(node, POPUP_KEYWORDS) || role === "dialog" || role === "alertdialog";
+  }
+
+  function isNotificationNode(node) {
+    if (!(node instanceof Element)) return false;
+    const role = node.getAttribute("role");
+    return (
+      matchesKeywords(node, NOTIFICATION_KEYWORDS) ||
+      role === "alert" ||
+      role === "status" ||
+      node.hasAttribute("aria-live")
+    );
+  }
+
+  function getAccessibleLabel(el) {
+    if (!el) return null;
+    const label = el.getAttribute && (el.getAttribute("aria-label") || el.getAttribute("title"));
+    if (label) return label.trim();
+    const text = (el.innerText !== undefined ? el.innerText : el.textContent || "").replace(/\s+/g, " ").trim();
+    return text ? text.slice(0, 40) : null;
+  }
+
   function isNoiseElement(node) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
     const tag = node.tagName;
-    return (
-      tag === "SCRIPT" ||
-      tag === "STYLE" ||
-      tag === "NOSCRIPT" ||
-      tag === "LINK" ||
-      tag === "META" ||
-      node.id === LIVE_REGION_ID
-    );
+    return tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || tag === "LINK" || tag === "META" || node.id === LIVE_REGION_ID;
   }
 
   function extractReadableText(node) {
     if (!node) return "";
-
     if (node.nodeType === Node.ELEMENT_NODE) {
-      if (node.id === LIVE_REGION_ID || node.closest?.("#" + LIVE_REGION_ID)) {
-        return "";
-      }
+      if (node.id === LIVE_REGION_ID || node.closest?.("#" + LIVE_REGION_ID)) return "";
       if (isNoiseElement(node)) return "";
     }
-
     let text = "";
     if (node.nodeType === Node.TEXT_NODE) {
       text = node.textContent || "";
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       text = node.innerText !== undefined ? node.innerText : node.textContent || "";
     }
-
     return text.replace(/\s+/g, " ").trim();
   }
 
-  function enqueueChange(text) {
-    if (!text || text.length < MIN_TEXT_LENGTH) return;
+  function enqueueChange(node, text) {
+    if (!text) return;
 
-    changeQueue.push({
-      text: text,
-      timestamp: Date.now(),
-    });
+    const isPopup = isPopupNode(node);
+    const isNotification = isNotificationNode(node);
 
+    changeQueue.push({ text: text, timestamp: Date.now(), isNotification: isNotification, isPopup: isPopup });
     if (changeQueue.length > MAX_QUEUE_LENGTH) {
       changeQueue.splice(0, changeQueue.length - MAX_QUEUE_LENGTH);
     }
+
+    if (isPopup && node instanceof Element) openPopups.push(node);
+    if (isNotification && node instanceof Element) lastNotificationElement = node;
   }
 
   function handleMutations(mutations) {
@@ -125,17 +167,20 @@
       if (mutation.type !== "childList") continue;
 
       mutation.addedNodes.forEach(function (node) {
-        if (
-          node.nodeType === Node.ELEMENT_NODE &&
-          (node.id === LIVE_REGION_ID || node.querySelector?.("#" + LIVE_REGION_ID))
-        ) {
-          return;
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.id === LIVE_REGION_ID || node.querySelector?.("#" + LIVE_REGION_ID)) return;
+          if (isNoiseElement(node)) return;
         }
-
-        if (node.nodeType === Node.ELEMENT_NODE && isNoiseElement(node)) return;
-
         const text = extractReadableText(node);
-        if (text) enqueueChange(text);
+        if (text) enqueueChange(node, text);
+      });
+
+      // Keep the popup list honest if the page removes its own popups.
+      mutation.removedNodes.forEach(function (node) {
+        openPopups = openPopups.filter(function (el) {
+          return el !== node && !(node.contains && node.contains(el));
+        });
+        if (lastNotificationElement === node) lastNotificationElement = null;
       });
     }
   }
@@ -143,47 +188,156 @@
   function startObserver() {
     const target = document.body || document.documentElement;
     if (!target) return;
-
     const observer = new MutationObserver(handleMutations);
-    observer.observe(target, {
-      childList: true,
-      subtree: true,
-      characterData: false,
-    });
+    observer.observe(target, { childList: true, subtree: true });
+  }
+
+  function armActionWindow() {
+    awaitingAction = true;
+    if (actionTimeoutId) window.clearTimeout(actionTimeoutId);
+    actionTimeoutId = window.setTimeout(function () {
+      awaitingAction = false;
+    }, ACTION_WINDOW_MS);
   }
 
   function announceSummary() {
+    awaitingPromptResponse = false;
+
     if (changeQueue.length === 0) {
       announce("No silent background updates detected on this page.");
       return;
     }
 
     const count = changeQueue.length;
-    const latest = changeQueue[changeQueue.length - 1].text;
-    const truncatedLatest = latest.length > 200 ? latest.slice(0, 200) + "…" : latest;
+    const hasNotification = changeQueue.some(function (e) { return e.isNotification; }) && !!lastNotificationElement;
+    const hasPopups = openPopups.filter(function (el) { return el.isConnected; }).length > 0;
 
-    announce(
-      "Summary: " + count + " dynamic update" + (count === 1 ? "" : "s") +
-      " logged. Latest: " + truncatedLatest
-    );
+    let message = count + " update" + (count === 1 ? "" : "s") + " detected.";
+    if (hasNotification) {
+      const label = getAccessibleLabel(lastNotificationElement) || "new activity";
+      message += " Notification: " + (label.length > 60 ? label.slice(0, 60) + "…" : label) + ".";
+    }
+    if (hasPopups) {
+      message += " Popup detected.";
+    }
 
+    const opts = [];
+    if (hasPopups) opts.push("1 to dismiss popups");
+    if (hasNotification) opts.push("2 to jump to notification");
+    opts.push("3 for full details");
+    message += " Press " + opts.join(", ") + ".";
+
+    announce(message);
+
+    lastSummarySnapshot = changeQueue.slice();
     changeQueue = [];
+    armActionWindow();
+  }
+
+  function dismissPopups() {
+    const popups = openPopups.filter(function (el) { return el.isConnected; });
+    if (popups.length === 0) {
+      announce("No popups to dismiss.");
+      return;
+    }
+    let dismissed = 0;
+    popups.forEach(function (el) {
+      const closeBtn = el.querySelector('[aria-label*="close" i], .close, [class*="close" i], button[title*="close" i]');
+      if (closeBtn) {
+        closeBtn.click();
+      } else {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      }
+      dismissed++;
+    });
+    openPopups = [];
+    announce("Attempted to dismiss " + dismissed + " popup" + (dismissed === 1 ? "" : "s") + ".");
+  }
+
+  function jumpToNotification() {
+    const el = lastNotificationElement;
+    if (!el || !el.isConnected) {
+      announce("No notification element found.");
+      return;
+    }
+    let target = el.matches("button, a, [tabindex], input, select, textarea") ? el : el.querySelector("button, a, [tabindex], input, select, textarea");
+    if (!target) {
+      target = el;
+      if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    }
+    target.scrollIntoView({ block: "center" });
+    target.focus();
+    const label = getAccessibleLabel(target) || "notification";
+    announce("Focus moved to " + label + ". Press Enter to open.");
+  }
+
+  function readFullDetails() {
+    if (lastSummarySnapshot.length === 0) {
+      announce("No details available.");
+      return;
+    }
+    const list = lastSummarySnapshot
+      .map(function (e, i) { return "Update " + (i + 1) + ": " + e.text; })
+      .join(". ");
+    announce(list.length > 500 ? list.slice(0, 500) + "…" : list);
+  }
+
+  function announceHelp() {
+    announce(
+      "Commands: Alt plus S for an update summary. Y or N to answer the new changes prompt. " +
+      "After a summary: 1 to dismiss popups, 2 to jump to a notification, 3 for full details. " +
+      "Alt plus H to hear this list again. Press Control at any time to stop NVDA from speaking."
+    );
+  }
+
+  function isEditableTarget() {
+    const active = document.activeElement;
+    return !!active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
   }
 
   function handleKeydown(event) {
-    if (!event.altKey || event.ctrlKey || event.metaKey) return;
-    if (event.key !== "s" && event.key !== "S") return;
+    if (isEditableTarget()) return;
 
-    const active = document.activeElement;
-    const isEditable =
-      active &&
-      (active.tagName === "INPUT" ||
-        active.tagName === "TEXTAREA" ||
-        active.isContentEditable);
-    if (isEditable) return;
+    if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "s" || event.key === "S")) {
+      event.preventDefault();
+      announceSummary();
+      return;
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "h" || event.key === "H")) {
+      event.preventDefault();
+      announceHelp();
+      return;
+    }
 
-    event.preventDefault();
-    announceSummary();
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+
+    if (awaitingPromptResponse && (event.key === "y" || event.key === "Y")) {
+      event.preventDefault();
+      announceSummary();
+      return;
+    }
+    if (awaitingPromptResponse && (event.key === "n" || event.key === "N")) {
+      event.preventDefault();
+      awaitingPromptResponse = false;
+      announce("Okay. Press Alt+S anytime for a summary.");
+      return;
+    }
+
+    if (awaitingAction && event.key === "1") {
+      event.preventDefault();
+      dismissPopups();
+      return;
+    }
+    if (awaitingAction && event.key === "2") {
+      event.preventDefault();
+      jumpToNotification();
+      return;
+    }
+    if (awaitingAction && event.key === "3") {
+      event.preventDefault();
+      readFullDetails();
+      return;
+    }
   }
 
   function init() {
