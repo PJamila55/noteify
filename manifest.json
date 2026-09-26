@@ -1,8 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "Silent Updates Announcer",
+  "name": "NOTEIFY",
   "version": "1.0.0",
-  "description": "Tracks silent DOM changes (live feeds, chat, scores) and announces an on-demand summary to screen readers like NVDA via Alt+S.",
+  "description": "NOTEIFY quietly tracks silent DOM changes (live feeds, chat, popups, scores) and announces an opt-in summary to screen readers like NVDA via Alt+S.",
+  "icons": {
+    "16": "logo.png",
+    "48": "logo.png",
+    "128": "logo.png"
+  },
+  "action": {
+    "default_title": "NOTEIFY",
+    "default_icon": "logo.png"
+  },
   "permissions": [
     "storage"
   ],

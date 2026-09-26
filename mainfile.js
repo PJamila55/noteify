@@ -1,3 +1,4 @@
+
 (function () {
   "use strict";
 
@@ -91,7 +92,7 @@
   function maybeOfferRevisitSummary() {
     if (changeQueue.length === 0) return;
     awaitingPromptResponse = true;
-    announce("New changes detected in site interface. Would you like a summary? Press Y for yes, N for no.");
+    announce("New changes detected in site interface. Would you like a summary? Press Alt plus Y for yes, Alt plus N for no.");
   }
 
   function matchesKeywords(node, keywords) {
@@ -147,6 +148,7 @@
     return text.replace(/\s+/g, " ").trim();
   }
 
+
   function enqueueChange(node, text) {
     if (!text) return;
 
@@ -175,7 +177,6 @@
         if (text) enqueueChange(node, text);
       });
 
-      // Keep the popup list honest if the page removes its own popups.
       mutation.removedNodes.forEach(function (node) {
         openPopups = openPopups.filter(function (el) {
           return el !== node && !(node.contains && node.contains(el));
@@ -222,9 +223,9 @@
     }
 
     const opts = [];
-    if (hasPopups) opts.push("1 to dismiss popups");
-    if (hasNotification) opts.push("2 to jump to notification");
-    opts.push("3 for full details");
+    if (hasPopups) opts.push("Alt plus 1 to dismiss popups");
+    if (hasNotification) opts.push("Alt plus 2 to jump to notification");
+    opts.push("Alt plus 3 for full details");
     message += " Press " + opts.join(", ") + ".";
 
     announce(message);
@@ -284,11 +285,13 @@
 
   function announceHelp() {
     announce(
-      "Commands: Alt plus S for an update summary. Y or N to answer the new changes prompt. " +
-      "After a summary: 1 to dismiss popups, 2 to jump to a notification, 3 for full details. " +
-      "Alt plus H to hear this list again. Press Control at any time to stop NVDA from speaking."
+      "NOTEIFY commands: Alt plus S for an update summary. Alt plus Y or Alt plus N to answer the new changes prompt. " +
+      "After a summary: Alt plus 1 to dismiss popups, Alt plus 2 to jump to a notification, Alt plus 3 for full details. " +
+      "Alt plus H to hear this list again. Press Control at any time to stop NVDA from speaking. " +
+      "All NOTEIFY commands use Alt so they never conflict with NVDA's own single-letter browse mode commands."
     );
   }
+
 
   function isEditableTarget() {
     const active = document.activeElement;
@@ -303,13 +306,14 @@
       announceSummary();
       return;
     }
+
     if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "h" || event.key === "H")) {
       event.preventDefault();
       announceHelp();
       return;
     }
 
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (!event.altKey || event.ctrlKey || event.metaKey) return;
 
     if (awaitingPromptResponse && (event.key === "y" || event.key === "Y")) {
       event.preventDefault();
