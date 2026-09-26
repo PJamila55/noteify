@@ -1,27 +1,35 @@
-
 (function () {
   "use strict";
 
+  // ---------------------------------------------------------------------
+  // Config
+  // ---------------------------------------------------------------------
   const HOSTNAME = window.location.hostname || "this page";
   const STORAGE_KEY = "silentUpdates_lastVisit_" + HOSTNAME;
   const MAX_QUEUE_LENGTH = 200;
   const LIVE_REGION_ID = "silent-updates-live-region";
-  const REVISIT_PROMPT_DELAY_MS = 4000;
-  const ACTION_WINDOW_MS = 10000;
+  const REVISIT_PROMPT_DELAY_MS = 4000; // window to gather changes before asking
+  const ACTION_WINDOW_MS = 10000; // how long 1/2/3 stay active after a summary
 
   const NOTIFICATION_KEYWORDS = ["notification", "notif", "alert", "toast", "badge", "unread", "chat", "message"];
   const POPUP_KEYWORDS = ["modal", "popup", "overlay", "dialog"];
 
-  let changeQueue = [];
-  let openPopups = [];
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  let changeQueue = []; // {text, timestamp, isNotification, isPopup}
+  let openPopups = []; // element refs currently believed to be open popups
   let lastNotificationElement = null;
 
   let awaitingPromptResponse = false;
   let awaitingAction = false;
   let actionTimeoutId = null;
 
-  let lastSummarySnapshot = [];
+  let lastSummarySnapshot = []; // frozen copy of queue text at last summary, for "3 = full details"
 
+  // ---------------------------------------------------------------------
+  // Invisible aria-live region
+  // ---------------------------------------------------------------------
   function createLiveRegion() {
     let region = document.getElementById(LIVE_REGION_ID);
     if (region) return region;
@@ -56,6 +64,9 @@
     }, 50);
   }
 
+  // ---------------------------------------------------------------------
+  // Return-visit tracking
+  // ---------------------------------------------------------------------
   function minutesAgo(timestamp) {
     const diffMs = Date.now() - timestamp;
     const mins = Math.max(0, Math.round(diffMs / 60000));
@@ -79,6 +90,8 @@
         const ago = minutesAgo(previous.lastVisit);
         announce("Welcome back to " + HOSTNAME + ". Last visited " + ago + ".");
 
+        // Give the page a short window to load in dynamic content, then
+        // ASK (don't force) whether the user wants a summary.
         window.setTimeout(maybeOfferRevisitSummary, REVISIT_PROMPT_DELAY_MS);
       }
 
@@ -90,11 +103,14 @@
   }
 
   function maybeOfferRevisitSummary() {
-    if (changeQueue.length === 0) return;
+    if (changeQueue.length === 0) return; // nothing changed, stay silent
     awaitingPromptResponse = true;
     announce("New changes detected in site interface. Would you like a summary? Press Alt plus Y for yes, Alt plus N for no.");
   }
 
+  // ---------------------------------------------------------------------
+  // Classification helpers
+  // ---------------------------------------------------------------------
   function matchesKeywords(node, keywords) {
     if (!(node instanceof Element)) return false;
     const cls = typeof node.className === "string" ? node.className : "";
@@ -127,6 +143,9 @@
     return text ? text.slice(0, 40) : null;
   }
 
+  // ---------------------------------------------------------------------
+  // Noise filtering / text extraction
+  // ---------------------------------------------------------------------
   function isNoiseElement(node) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
     const tag = node.tagName;
@@ -148,7 +167,9 @@
     return text.replace(/\s+/g, " ").trim();
   }
 
-
+  // ---------------------------------------------------------------------
+  // Silent mutation queue
+  // ---------------------------------------------------------------------
   function enqueueChange(node, text) {
     if (!text) return;
 
@@ -177,6 +198,7 @@
         if (text) enqueueChange(node, text);
       });
 
+      // Keep the popup list honest if the page removes its own popups.
       mutation.removedNodes.forEach(function (node) {
         openPopups = openPopups.filter(function (el) {
           return el !== node && !(node.contains && node.contains(el));
@@ -193,6 +215,9 @@
     observer.observe(target, { childList: true, subtree: true });
   }
 
+  // ---------------------------------------------------------------------
+  // Summary + quick actions
+  // ---------------------------------------------------------------------
   function armActionWindow() {
     awaitingAction = true;
     if (actionTimeoutId) window.clearTimeout(actionTimeoutId);
@@ -292,7 +317,9 @@
     );
   }
 
-
+  // ---------------------------------------------------------------------
+  // Keyboard handling
+  // ---------------------------------------------------------------------
   function isEditableTarget() {
     const active = document.activeElement;
     return !!active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
@@ -301,18 +328,25 @@
   function handleKeydown(event) {
     if (isEditableTarget()) return;
 
+    // Alt + S — on-demand summary
     if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "s" || event.key === "S")) {
       event.preventDefault();
       announceSummary();
       return;
     }
 
+    // Alt + H — help / command list
     if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "h" || event.key === "H")) {
       event.preventDefault();
       announceHelp();
       return;
     }
 
+    // Every remaining NOTEIFY command requires Alt. This is deliberate:
+    // NVDA's browse mode reserves bare letters/numbers (h, k, b, l, t, f,
+    // and 1-6 for heading levels, etc.) for its own quick-navigation and
+    // swallows those keystrokes before the page ever sees them. Keeping
+    // everything on Alt+<key> avoids any overlap with NVDA's own commands.
     if (!event.altKey || event.ctrlKey || event.metaKey) return;
 
     if (awaitingPromptResponse && (event.key === "y" || event.key === "Y")) {
@@ -344,6 +378,9 @@
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Init
+  // ---------------------------------------------------------------------
   function init() {
     createLiveRegion();
     trackVisit();
