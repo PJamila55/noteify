@@ -12,17 +12,9 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["mainfile.js"],
+      "js": ["content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }
-  ],
-  "commands": {
-    "announce-summary": {
-      "suggested_key": {
-        "default": "Alt+S"
-      },
-      "description": "Announce summary to screen reader"
-    }
-  }
+  ]
 }
