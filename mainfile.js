@@ -1,3 +1,31 @@
+/**
+ * NOTEIFY - content.js
+ *
+ * Solves "Interfaces That Change Silently" for screen reader users.
+ *
+ * Flow:
+ *  1. On load, silently tracks return visits per-domain in chrome.storage.local.
+ *  2. A MutationObserver silently queues dynamic DOM changes (no interruption).
+ *  3. On a return visit, if changes accumulate shortly after load, the user is
+ *     ASKED (not told) whether they want a summary: "...Would you like a
+ *     summary? Press Alt+Y for yes, Alt+N for no."
+ *  4. Alt+S gives a short, categorized summary at any time.
+ *  5. After a summary, quick actions are available for a short window:
+ *       Alt+1 = dismiss detected popups/modals
+ *       Alt+2 = move focus to the detected notification (Enter activates it)
+ *       Alt+3 = read full detail list
+ *  6. Alt+H announces the full command list on demand.
+ *
+ * Every command requires the Alt modifier on purpose: NVDA's browse mode
+ * reserves bare letters and numbers (1-6 for heading levels, h/k/b/l/t/f/etc.
+ * for element quick-nav) and swallows them before they reach the page, so
+ * bare-key commands are unreliable. Alt+<key> is never intercepted by NVDA.
+ *
+ * Note: NVDA has its own built-in "stop speech" key (Ctrl). This extension
+ * cannot override that — it's documented in README.md and in the Alt+H
+ * help text so users can discover it themselves.
+ */
+
 (function () {
   "use strict";
 
@@ -152,12 +180,18 @@
     return tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || tag === "LINK" || tag === "META" || node.id === LIVE_REGION_ID;
   }
 
+  function isInsideLiveRegion(node) {
+    // Handles both element nodes and text nodes (text nodes have no
+    // .closest(), so we walk up via parentElement instead).
+    const el = node && node.nodeType === Node.ELEMENT_NODE ? node : node && node.parentElement;
+    if (!el) return false;
+    if (el.id === LIVE_REGION_ID) return true;
+    return !!(el.closest && el.closest("#" + LIVE_REGION_ID));
+  }
+
   function extractReadableText(node) {
     if (!node) return "";
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      if (node.id === LIVE_REGION_ID || node.closest?.("#" + LIVE_REGION_ID)) return "";
-      if (isNoiseElement(node)) return "";
-    }
+    if (node.nodeType === Node.ELEMENT_NODE && isNoiseElement(node)) return "";
     let text = "";
     if (node.nodeType === Node.TEXT_NODE) {
       text = node.textContent || "";
@@ -172,6 +206,10 @@
   // ---------------------------------------------------------------------
   function enqueueChange(node, text) {
     if (!text) return;
+
+    // Never queue back-to-back duplicate text — guards against a site
+    // (or a stray DOM re-render) reporting the same change twice in a row.
+    if (changeQueue.length > 0 && changeQueue[changeQueue.length - 1].text === text) return;
 
     const isPopup = isPopupNode(node);
     const isNotification = isNotificationNode(node);
@@ -190,10 +228,15 @@
       if (mutation.type !== "childList") continue;
 
       mutation.addedNodes.forEach(function (node) {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          if (node.id === LIVE_REGION_ID || node.querySelector?.("#" + LIVE_REGION_ID)) return;
-          if (isNoiseElement(node)) return;
-        }
+        // Critical: ignore ANY node inside our own live region — this
+        // includes the text nodes created when announce() swaps the
+        // region's textContent, not just the region element itself.
+        // Missing this for text nodes previously caused NOTEIFY's own
+        // announcements (e.g. "Welcome back to...") to be re-queued as
+        // if they were page content, then read back later — the
+        // repetition bug.
+        if (isInsideLiveRegion(node)) return;
+        if (node.nodeType === Node.ELEMENT_NODE && isNoiseElement(node)) return;
         const text = extractReadableText(node);
         if (text) enqueueChange(node, text);
       });
@@ -328,15 +371,24 @@
   function handleKeydown(event) {
     if (isEditableTarget()) return;
 
-    // Alt + S — on-demand summary
-    if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "s" || event.key === "S")) {
+    // Debug aid: open DevTools > Console to confirm NOTEIFY is even
+    // receiving your keystrokes (helps tell "not working" apart from
+    // "nothing active right now").
+    if (event.altKey) {
+      console.log("[NOTEIFY] keydown", { key: event.key, code: event.code, awaitingPromptResponse, awaitingAction });
+    }
+
+    // Alt + S — on-demand summary. Matched on event.code (physical key)
+    // rather than event.key, since event.key for Alt-held letters can
+    // vary by keyboard layout/locale in a way event.code does not.
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === "KeyS") {
       event.preventDefault();
       announceSummary();
       return;
     }
 
     // Alt + H — help / command list
-    if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "h" || event.key === "H")) {
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === "KeyH") {
       event.preventDefault();
       announceHelp();
       return;
@@ -349,31 +401,51 @@
     // everything on Alt+<key> avoids any overlap with NVDA's own commands.
     if (!event.altKey || event.ctrlKey || event.metaKey) return;
 
-    if (awaitingPromptResponse && (event.key === "y" || event.key === "Y")) {
+    if (event.code === "KeyY") {
       event.preventDefault();
-      announceSummary();
+      if (awaitingPromptResponse) {
+        announceSummary();
+      } else {
+        announce("No prompt is currently active. Press Alt+S for a summary anytime.");
+      }
       return;
     }
-    if (awaitingPromptResponse && (event.key === "n" || event.key === "N")) {
+    if (event.code === "KeyN") {
       event.preventDefault();
-      awaitingPromptResponse = false;
-      announce("Okay. Press Alt+S anytime for a summary.");
+      if (awaitingPromptResponse) {
+        awaitingPromptResponse = false;
+        announce("Okay. Press Alt+S anytime for a summary.");
+      } else {
+        announce("No prompt is currently active.");
+      }
       return;
     }
 
-    if (awaitingAction && event.key === "1") {
+    if (event.code === "Digit1") {
       event.preventDefault();
-      dismissPopups();
+      if (awaitingAction) {
+        dismissPopups();
+      } else {
+        announce("No quick actions available right now. Press Alt+S for a summary first.");
+      }
       return;
     }
-    if (awaitingAction && event.key === "2") {
+    if (event.code === "Digit2") {
       event.preventDefault();
-      jumpToNotification();
+      if (awaitingAction) {
+        jumpToNotification();
+      } else {
+        announce("No quick actions available right now. Press Alt+S for a summary first.");
+      }
       return;
     }
-    if (awaitingAction && event.key === "3") {
+    if (event.code === "Digit3") {
       event.preventDefault();
-      readFullDetails();
+      if (awaitingAction) {
+        readFullDetails();
+      } else {
+        announce("No quick actions available right now. Press Alt+S for a summary first.");
+      }
       return;
     }
   }
